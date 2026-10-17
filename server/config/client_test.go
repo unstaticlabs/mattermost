@@ -1003,3 +1003,22 @@ func TestGetLimitedClientConfig(t *testing.T) {
 		})
 	}
 }
+
+// USL fork: the OpenID Connect login works without a licence, so the limited
+// client config (login page, mobile apps) carries its settings.
+func TestGetLimitedClientConfigOpenIdWithoutLicense(t *testing.T) {
+	c := &model.Config{}
+	c.SetDefaults()
+	*c.OpenIdSettings.Enable = true
+	*c.OpenIdSettings.ButtonText = "Pocket ID"
+	*c.OpenIdSettings.ButtonColor = "#123456"
+
+	configMap := GenerateLimitedClientConfig(c, "", nil)
+	assert.Equal(t, "true", configMap["EnableSignUpWithOpenId"])
+	assert.Equal(t, "Pocket ID", configMap["OpenIdButtonText"])
+	assert.Equal(t, "#123456", configMap["OpenIdButtonColor"])
+
+	*c.OpenIdSettings.Enable = false
+	configMap = GenerateLimitedClientConfig(c, "", nil)
+	assert.Equal(t, "false", configMap["EnableSignUpWithOpenId"])
+}

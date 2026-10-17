@@ -1,0 +1,100 @@
+# USL fork: builds the Team Edition image with the open-source OpenID Connect
+# provider (server/channels/app/oauthproviders/openid) and pushes it to GHCR.
+#
+#   push to usl/**          -> ghcr.io/unstaticlabs/mattermost-team-edition:sha-<short>
+#   push tag v*-usl.*       -> ghcr.io/unstaticlabs/mattermost-team-edition:<version>-usl.<n>
+#
+# It runs the same make targets as upstream server-ci.yml (build-cmd, package)
+# and the upstream server/build/Dockerfile, unchanged: that Dockerfile
+# downloads the package from MM_PACKAGE, so a local web server hands it the
+# package that this job built.
+name: USL image
+
+on:
+  push:
+    branches: ["usl/**"]
+    tags: ["v*-usl.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: usl-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Test the OpenID provider
+        working-directory: server
+        run: |
+          make setup-go-work
+          go test ./channels/app/oauthproviders/...
+
+      - name: Build the Team Edition package
+        working-directory: server
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          export BUILD_NUMBER="usl-${RUN_ID}"
+          export FIPS_ENABLED=false
+          make config-reset
+          make build-cmd
+          make package
+          ls -l dist/*.tar.gz
+
+      - name: Image tag
+        id: tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "${REF_TYPE}" = tag ]; then
+            echo "tag=${REF_NAME#v}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "tag=sha-${SHA::7}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the image
+        env:
+          IMAGE: ghcr.io/unstaticlabs/mattermost-team-edition:${{ steps.tag.outputs.tag }}
+        run: |
+          python3 -m http.server 8000 --bind 127.0.0.1 --directory server/dist &
+          trap 'kill %1' EXIT
+          sleep 1
+          docker build --network host --platform linux/amd64 \
+            --build-arg MM_PACKAGE=http://127.0.0.1:8000/mattermost-team-linux-amd64.tar.gz \
+            --label org.opencontainers.image.source=https://github.com/unstaticlabs/mattermost \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            -t "${IMAGE}" server/build
+          docker push "${IMAGE}"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}")
+          echo "Image: \`${digest}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "${digest}"
