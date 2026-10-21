@@ -1,0 +1,13 @@
+# Upstream features that the USL build must keep disabled.
+# check-upstream.sh searches the added lines of the upstream diff of
+# feature_flags.go, config.go, and the Makefile for each pattern. A match
+# stops the update.
+#
+# Format: <extended regex>    # <reason and decision date>
+#
+# Add a line when you decide to keep a feature disabled. Remove the line
+# when you accept the feature.
+
+# Examples, not active:
+# f\.HealthDashboard = true                  # keep the old dashboard
+# PLUGIN_PACKAGES \+= mattermost-plugin-ai   # no AI plugin in the image
