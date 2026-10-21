@@ -1,0 +1,26 @@
+# Upstream files that the USL changes depend on.
+# check-upstream.sh compares each file between the base tag and the target.
+#
+# Format: <level> <path>
+#   stop    A change can break the USL features. Read the diff before you update.
+#   review  A change can change the build or the behaviour. Read the diff.
+
+# The USL changes edit these files. A change here gives a cherry-pick conflict.
+stop    server/cmd/mattermost/main.go
+stop    server/config/client.go
+
+# The OpenID provider uses these interfaces and this flow.
+stop    server/einterfaces/oauthproviders.go
+stop    server/channels/app/oauth.go
+stop    server/channels/web/oauth.go
+stop    server/channels/api4/oauth.go
+
+# The settings and the login button.
+review  server/public/model/config.go
+review  server/public/model/user.go
+review  webapp/channels/src/components/login/login.tsx
+
+# The image build in .github/workflows/usl-image.yml.
+review  server/build/Dockerfile
+review  server/Makefile
+review  server/build/release.mk

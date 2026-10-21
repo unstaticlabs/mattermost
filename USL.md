@@ -2,10 +2,21 @@
 
 This fork is Mattermost Team Edition with a login through any OpenID Connect
 provider. Unstatic Labs uses it with Pocket ID at `chat.unstaticlabs.com`.
-Upstream v11 has OpenID Connect only in its licensed Enterprise code.
+Upstream has OpenID Connect only in its licensed Enterprise code.
 
 The fork changes only open-source (AGPLv3) code. It does not use or change
 the code under `server/enterprise/`.
+
+## The documents
+
+| Document | Use it to |
+|---|---|
+| [`usl/features.md`](usl/features.md) | Read the features that each USL build must keep, and how to check them |
+| [`usl/update.md`](usl/update.md) | Update the fork to a new upstream version |
+| [`usl/update-log.md`](usl/update-log.md) | Read the earlier checks, updates, and decisions |
+| [`usl/check-upstream.sh`](usl/check-upstream.sh) | Check upstream before an update. The script only reads |
+| [`usl/watched-files.txt`](usl/watched-files.txt) | The upstream files that the USL changes depend on |
+| [`usl/denylist.txt`](usl/denylist.txt) | The upstream features that the USL build must keep disabled |
 
 ## The changes
 
@@ -16,6 +27,7 @@ the code under `server/enterprise/`.
 | `server/config/client.go` | Sends the OpenID button settings to the login page and the mobile apps without a licence |
 | `server/config/client_test.go` | A test for that change |
 | `.github/workflows/usl-image.yml` | Builds the image and pushes it to GHCR |
+| `USL.md`, `usl/` | The documentation of the fork |
 
 The provider uses the OAuth flow of the server, and reads the user from the
 userinfo endpoint. It refuses a user whose email the provider does not mark
@@ -46,8 +58,4 @@ The callback URL at the provider is `<SiteURL>/signup/openid/complete`.
 
 ## Upgrade to a new Mattermost version
 
-1. Fetch the new upstream tag, for example `v11.12.0`.
-2. Create `usl/v11.12.0` from that tag, and cherry-pick the USL commits of
-   the previous `usl/` branch.
-3. Run `go test ./channels/app/oauthproviders/... ./config/` in `server/`.
-4. Push the branch, then push the tag `v11.12.0-usl.1`.
+Follow [`usl/update.md`](usl/update.md). Start with `usl/check-upstream.sh`.
