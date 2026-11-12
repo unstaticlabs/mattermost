@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -384,4 +385,465 @@ func TestIsAuditLevelActive(t *testing.T) {
 			assert.Equal(t, tc.expected, IsAuditLevelActive(auditSettings, tc.allowAdvancedLogging, tc.level))
 		})
 	}
+}
+
+func TestIsLogPathEnforcementEnabled(t *testing.T) {
+	t.Run("nil config", func(t *testing.T) {
+		assert.False(t, IsLogPathEnforcementEnabled(nil))
+	})
+
+	t.Run("nil feature flags", func(t *testing.T) {
+		assert.False(t, IsLogPathEnforcementEnabled(&model.Config{}))
+	})
+
+	t.Run("flag off", func(t *testing.T) {
+		cfg := &model.Config{FeatureFlags: &model.FeatureFlags{}}
+		cfg.FeatureFlags.SetDefaults()
+		assert.False(t, IsLogPathEnforcementEnabled(cfg))
+	})
+
+	t.Run("flag on", func(t *testing.T) {
+		cfg := &model.Config{FeatureFlags: &model.FeatureFlags{EnforceLogPathRoot: true}}
+		assert.True(t, IsLogPathEnforcementEnabled(cfg))
+	})
+}
+
+func TestValidateLogPaths(t *testing.T) {
+	// root and outside are siblings so that neither is a path prefix of the other
+	base := t.TempDir()
+	root := filepath.Join(base, "logs")
+	require.NoError(t, os.MkdirAll(root, 0700))
+	outside := filepath.Join(base, "evil")
+	require.NoError(t, os.MkdirAll(outside, 0700))
+
+	fileTargetJSON := func(name, path string) json.RawMessage {
+		raw, err := json.Marshal(map[string]any{
+			name: map[string]any{
+				"type":    "file",
+				"levels":  []map[string]any{{"id": 2, "name": "error"}},
+				"options": map[string]any{"filename": path},
+			},
+		})
+		require.NoError(t, err)
+		return raw
+	}
+
+	// baseCfg returns a config whose every log path is inside root.
+	baseCfg := func() *model.Config {
+		cfg := &model.Config{}
+		cfg.SetDefaults()
+		cfg.LogSettings.EnableFile = new(true)
+		cfg.LogSettings.FileLocation = new(root)
+		cfg.ExperimentalAuditSettings.FileEnabled = new(false)
+		cfg.ExperimentalAuditSettings.FileName = new(filepath.Join(root, "audit.log"))
+		return cfg
+	}
+
+	t.Run("nil config", func(t *testing.T) {
+		assert.NoError(t, ValidateLogPaths(nil, nil, root))
+	})
+
+	t.Run("clean config", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ExperimentalAuditSettings.FileEnabled = new(true)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON("ok", filepath.Join(root, "adv.log"))
+		cfg.ExperimentalAuditSettings.AdvancedLoggingJSON = fileTargetJSON("ok-audit", filepath.Join(root, "adv-audit.log"))
+
+		assert.NoError(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("LogSettings.FileLocation outside root", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.LogSettings.FileLocation = new(outside)
+
+		err := ValidateLogPaths(cfg, nil, root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "LogSettings.FileLocation")
+		assert.Contains(t, err.Error(), GetLogFileLocation(outside))
+		assert.Contains(t, err.Error(), "outside logging root")
+	})
+
+	t.Run("LogSettings.FileLocation skipped when EnableFile is false", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.LogSettings.EnableFile = new(false)
+		cfg.LogSettings.FileLocation = new(outside)
+
+		assert.NoError(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("LogSettings.AdvancedLoggingJSON outside root", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON("evil", filepath.Join(outside, "out.log"))
+
+		err := ValidateLogPaths(cfg, nil, root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `LogSettings.AdvancedLoggingJSON target "evil"`)
+		assert.Contains(t, err.Error(), filepath.Join(outside, "out.log"))
+	})
+
+	t.Run("AdvancedLoggingJSON file type is case-insensitive", func(t *testing.T) {
+		// logr lowercases type before building targets; mixed case must still be enforced
+		raw, err := json.Marshal(map[string]any{
+			"evil": map[string]any{
+				"type":    "File",
+				"levels":  []map[string]any{{"id": 2, "name": "error"}},
+				"options": map[string]any{"filename": filepath.Join(outside, "out.log")},
+			},
+		})
+		require.NoError(t, err)
+
+		cfg := baseCfg()
+		cfg.LogSettings.AdvancedLoggingJSON = raw
+
+		err = ValidateLogPaths(cfg, nil, root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `LogSettings.AdvancedLoggingJSON target "evil"`)
+	})
+
+	t.Run("ExperimentalAuditSettings.FileName outside root", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ExperimentalAuditSettings.FileEnabled = new(true)
+		cfg.ExperimentalAuditSettings.FileName = new(filepath.Join(outside, "audit.log"))
+
+		err := ValidateLogPaths(cfg, nil, root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ExperimentalAuditSettings.FileName")
+		assert.Contains(t, err.Error(), filepath.Join(outside, "audit.log"))
+	})
+
+	t.Run("ExperimentalAuditSettings.FileName skipped when FileEnabled is false", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ExperimentalAuditSettings.FileEnabled = new(false)
+		cfg.ExperimentalAuditSettings.FileName = new(filepath.Join(outside, "audit.log"))
+
+		assert.NoError(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("ExperimentalAuditSettings.AdvancedLoggingJSON outside root", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.ExperimentalAuditSettings.AdvancedLoggingJSON = fileTargetJSON("evil-audit", filepath.Join(outside, "out.log"))
+
+		err := ValidateLogPaths(cfg, nil, root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `ExperimentalAuditSettings.AdvancedLoggingJSON target "evil-audit"`)
+	})
+
+	t.Run("non-file targets are ignored", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.LogSettings.AdvancedLoggingJSON = json.RawMessage(`{"console": {"type": "console", "levels": [{"id": 2, "name": "error"}], "options": {"out": "stdout"}}}`)
+
+		assert.NoError(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("malformed AdvancedLoggingJSON is skipped", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.LogSettings.AdvancedLoggingJSON = json.RawMessage(`{"broken": `)
+		cfg.ExperimentalAuditSettings.AdvancedLoggingJSON = json.RawMessage(`{"broken": `)
+
+		assert.NoError(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("reports the first offending field in config order", func(t *testing.T) {
+		cfg := baseCfg()
+		cfg.LogSettings.FileLocation = new(outside)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON("evil", filepath.Join(outside, "out.log"))
+		cfg.ExperimentalAuditSettings.FileEnabled = new(true)
+		cfg.ExperimentalAuditSettings.FileName = new(filepath.Join(outside, "audit.log"))
+
+		err := ValidateLogPaths(cfg, nil, root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "LogSettings.FileLocation")
+	})
+
+	t.Run("reports a deterministic target when several in one section are bad", func(t *testing.T) {
+		raw, err := json.Marshal(map[string]any{
+			"zeta":  map[string]any{"type": "file", "levels": []map[string]any{{"id": 2, "name": "error"}}, "options": map[string]any{"filename": filepath.Join(outside, "z.log")}},
+			"alpha": map[string]any{"type": "file", "levels": []map[string]any{{"id": 2, "name": "error"}}, "options": map[string]any{"filename": filepath.Join(outside, "a.log")}},
+		})
+		require.NoError(t, err)
+
+		cfg := baseCfg()
+		cfg.LogSettings.AdvancedLoggingJSON = raw
+
+		for range 20 {
+			err := ValidateLogPaths(cfg, nil, root)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `target "alpha"`, "the alphabetically first bad target should always be reported")
+		}
+	})
+}
+
+func TestIsWithinDir(t *testing.T) {
+	sep := string(filepath.Separator)
+	dir := sep + "opt" + sep + "mattermost"
+
+	assert.True(t, isWithinDir(dir, dir), "the directory itself is inside")
+	assert.True(t, isWithinDir(dir+sep+"plugins"+sep+"x", dir))
+	assert.False(t, isWithinDir(sep+"opt", dir), "a parent is outside")
+	assert.False(t, isWithinDir(dir+"-other"+sep+"x", dir), "a sibling with a common prefix is outside")
+	assert.False(t, isWithinDir(sep+"srv", dir))
+}
+
+func TestManagedDirs(t *testing.T) {
+	newCfg := func(plugins, client, data string) *model.Config {
+		cfg := &model.Config{}
+		cfg.SetDefaults()
+		cfg.PluginSettings.Directory = new(plugins)
+		cfg.PluginSettings.ClientDirectory = new(client)
+		cfg.FileSettings.Directory = new(data)
+		return cfg
+	}
+
+	t.Run("failed lookups add nothing", func(t *testing.T) {
+		assert.Empty(t, foundDir("./", false))
+		assert.Equal(t, "/x", foundDir("/x", true))
+	})
+
+	t.Run("empty settings add nothing", func(t *testing.T) {
+		dirs := managedDirs(newCfg("", " ", ""), nil)
+		assert.NotContains(t, dirs, "")
+		assert.NotContains(t, dirs, " ")
+	})
+
+	t.Run("config and active directories contribute", func(t *testing.T) {
+		dirs := managedDirs(newCfg("/new/plugins", "/new/client", "/new/data"), []string{"/old/plugins", "/etc/mattermost"})
+		assert.Subset(t, dirs, []string{"/new/plugins", "/new/client", "/new/data", "/old/plugins", "/etc/mattermost"})
+	})
+
+	t.Run("no active directories adds none", func(t *testing.T) {
+		dirs := managedDirs(newCfg("/new/plugins", "/new/client", "/new/data"), nil)
+		assert.Contains(t, dirs, "/new/plugins")
+		assert.NotContains(t, dirs, "/old/plugins")
+	})
+
+	t.Run("export and compliance directories are managed", func(t *testing.T) {
+		cfg := newCfg("/p", "/c", "/d")
+		cfg.FileSettings.ExportDirectory = new("/export")
+		cfg.ComplianceSettings.Directory = new("/compliance")
+		assert.Subset(t, managedDirs(cfg, nil), []string{"/export", "/compliance"})
+	})
+
+	t.Run("nil config sets no directories", func(t *testing.T) {
+		assert.Empty(t, ConfigurableManagedDirs(nil))
+	})
+
+	t.Run("executable directory is managed", func(t *testing.T) {
+		exe, err := os.Executable()
+		require.NoError(t, err)
+		assert.Contains(t, managedDirs(newCfg("/p", "/c", "/d"), nil), filepath.Dir(exe))
+	})
+
+	t.Run("duplicates are removed", func(t *testing.T) {
+		cfg := newCfg("/same", "/same", "/same")
+		assert.Equal(t, 1, strings.Count(strings.Join(managedDirs(cfg, []string{"/same"}), "\n"), "/same"))
+	})
+}
+
+func TestValidateLogPathsManagedDirs(t *testing.T) {
+	// root is wide, like MM_LOG_PATH=/opt, and contains the plugin directory
+	root := t.TempDir()
+	pluginDir := filepath.Join(root, "mattermost", "plugins")
+	logDir := filepath.Join(root, "mattermost", "logs")
+	require.NoError(t, os.MkdirAll(pluginDir, 0700))
+	require.NoError(t, os.MkdirAll(logDir, 0700))
+
+	fileTargetJSON := func(path string) json.RawMessage {
+		raw, err := json.Marshal(map[string]any{
+			"t": map[string]any{
+				"type":    "file",
+				"levels":  []map[string]any{{"id": 2, "name": "error"}},
+				"options": map[string]any{"filename": path},
+			},
+		})
+		require.NoError(t, err)
+		return raw
+	}
+
+	cfgWith := func(plugins string) *model.Config {
+		cfg := &model.Config{}
+		cfg.SetDefaults()
+		cfg.LogSettings.EnableFile = new(true)
+		cfg.LogSettings.FileLocation = new(logDir)
+		cfg.ExperimentalAuditSettings.FileEnabled = new(false)
+		cfg.PluginSettings.Directory = new(plugins)
+		return cfg
+	}
+
+	pluginBinary := filepath.Join(pluginDir, "x", "plugin")
+
+	t.Run("target outside managed directories is accepted", func(t *testing.T) {
+		cfg := cfgWith(pluginDir)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(filepath.Join(logDir, "mattermost.log"))
+		assert.NoError(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("each field rejects a target inside the plugin directory", func(t *testing.T) {
+		cases := map[string]func(*model.Config){
+			"LogSettings.FileLocation": func(cfg *model.Config) {
+				cfg.LogSettings.FileLocation = new(pluginDir)
+			},
+			"LogSettings.AdvancedLoggingJSON": func(cfg *model.Config) {
+				cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(pluginBinary)
+			},
+			"ExperimentalAuditSettings.FileName": func(cfg *model.Config) {
+				cfg.ExperimentalAuditSettings.FileEnabled = new(true)
+				cfg.ExperimentalAuditSettings.FileName = new(pluginBinary)
+			},
+			"ExperimentalAuditSettings.AdvancedLoggingJSON": func(cfg *model.Config) {
+				cfg.ExperimentalAuditSettings.AdvancedLoggingJSON = fileTargetJSON(pluginBinary)
+			},
+		}
+		for field, mutate := range cases {
+			t.Run(field, func(t *testing.T) {
+				cfg := cfgWith(pluginDir)
+				mutate(cfg)
+
+				err := ValidateLogPaths(cfg, nil, root)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), field)
+				assert.Contains(t, err.Error(), "inside server-managed directory")
+				assert.Contains(t, err.Error(), pluginDir)
+			})
+		}
+	})
+
+	t.Run("target equal to a managed directory is rejected", func(t *testing.T) {
+		cfg := cfgWith(pluginDir)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(pluginDir)
+		assert.Error(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("target inside an active plugin directory is rejected when the new config moves it", func(t *testing.T) {
+		newCfg := cfgWith(filepath.Join(root, "elsewhere"))
+		newCfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(pluginBinary)
+
+		assert.NoError(t, ValidateLogPaths(newCfg, nil, root))
+		assert.Error(t, ValidateLogPaths(newCfg, []string{pluginDir}, root))
+	})
+
+	t.Run("target inside the new plugin directory is rejected when the active directories differ", func(t *testing.T) {
+		newCfg := cfgWith(pluginDir)
+		newCfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(pluginBinary)
+
+		assert.Error(t, ValidateLogPaths(newCfg, []string{filepath.Join(root, "elsewhere")}, root))
+	})
+
+	t.Run("compliance directory is managed", func(t *testing.T) {
+		complianceDir := filepath.Join(root, "mattermost", "compliance")
+		cfg := cfgWith(pluginDir)
+		cfg.ComplianceSettings.Directory = new(complianceDir)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(filepath.Join(complianceDir, "compliance", "export.zip"))
+		assert.Error(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("data directory is managed", func(t *testing.T) {
+		dataDir := filepath.Join(root, "mattermost", "data")
+		cfg := cfgWith(pluginDir)
+		cfg.FileSettings.Directory = new(dataDir)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(filepath.Join(dataDir, "out.log"))
+		assert.Error(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("managed directory containing the logging root is skipped", func(t *testing.T) {
+		cfg := cfgWith(root)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(filepath.Join(logDir, "adv.log"))
+		assert.NoError(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("managed directory equal to the logging root is skipped", func(t *testing.T) {
+		cfg := cfgWith(logDir)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(filepath.Join(logDir, "adv.log"))
+		assert.NoError(t, ValidateLogPaths(cfg, nil, logDir))
+	})
+
+	t.Run("target reaching the plugin directory through a symlink is rejected", func(t *testing.T) {
+		link := filepath.Join(logDir, "link")
+		if err := os.Symlink(pluginDir, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		// the link lives inside root, so only the managed-directory check can reject it
+		cfg := cfgWith(pluginDir)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(filepath.Join(link, "x", "plugin"))
+
+		err := ValidateLogPaths(cfg, nil, root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "inside server-managed directory")
+	})
+
+	t.Run("managed directory behind a symlink is resolved", func(t *testing.T) {
+		link := filepath.Join(root, "plugins-link")
+		if err := os.Symlink(pluginDir, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		cfg := cfgWith(link)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(pluginBinary)
+		assert.Error(t, ValidateLogPaths(cfg, nil, root))
+	})
+
+	t.Run("relative managed directory is made absolute", func(t *testing.T) {
+		wd, err := os.Getwd()
+		require.NoError(t, err)
+
+		cfg := cfgWith("./plugins")
+		cfg.LogSettings.EnableFile = new(false)
+		cfg.LogSettings.AdvancedLoggingJSON = fileTargetJSON(filepath.Join(wd, "plugins", "x", "plugin"))
+
+		err = ValidateLogPaths(cfg, nil, wd)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "inside server-managed directory")
+	})
+}
+
+func TestValidateLogFilePathSymlinkResolution(t *testing.T) {
+	t.Run("accepts an existing file under a symlinked root", func(t *testing.T) {
+		base := t.TempDir()
+
+		realRoot := filepath.Join(base, "real-logs")
+		require.NoError(t, os.MkdirAll(realRoot, 0700))
+
+		linkedRoot := filepath.Join(base, "linked-logs")
+		require.NoError(t, os.Symlink(realRoot, linkedRoot))
+
+		logFile := filepath.Join(realRoot, "mattermost.log")
+		require.NoError(t, os.WriteFile(logFile, []byte("ok"), 0600))
+
+		// the root is reached through the symlink, the file through the real path
+		assert.NoError(t, ValidateLogFilePath(logFile, linkedRoot))
+		// ...and the other way around
+		assert.NoError(t, ValidateLogFilePath(filepath.Join(linkedRoot, "mattermost.log"), realRoot))
+	})
+
+	t.Run("rejects a not-yet-created file whose parent symlinks out of the root", func(t *testing.T) {
+		base := t.TempDir()
+
+		root := filepath.Join(base, "logs")
+		require.NoError(t, os.MkdirAll(root, 0700))
+		outside := filepath.Join(base, "evil")
+		require.NoError(t, os.MkdirAll(outside, 0700))
+
+		// a symlink inside the root pointing out of it
+		require.NoError(t, os.Symlink(outside, filepath.Join(root, "escape")))
+
+		// the file does not exist yet, so only its parent can be resolved
+		err := ValidateLogFilePath(filepath.Join(root, "escape", "out.log"), root)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "outside logging root")
+	})
+
+	t.Run("accepts a not-yet-created file in a not-yet-created subdirectory of the root", func(t *testing.T) {
+		base := t.TempDir()
+
+		root := filepath.Join(base, "logs")
+		require.NoError(t, os.MkdirAll(root, 0700))
+
+		assert.NoError(t, ValidateLogFilePath(filepath.Join(root, "nested", "deeper", "out.log"), root))
+	})
+
+	t.Run("rejects a path outside a root that does not exist yet", func(t *testing.T) {
+		base := t.TempDir()
+
+		err := ValidateLogFilePath(filepath.Join(base, "evil", "out.log"), filepath.Join(base, "missing-root"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "outside logging root")
+	})
 }

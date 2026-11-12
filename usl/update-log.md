@@ -3,6 +3,45 @@
 Write the newest entry at the top. Each entry gives the target, the
 decisions about the STOP and REVIEW items, and the result.
 
+## 2026-11-12: Prepare the 12.0.2 security patch
+
+- **Base:** `v12.0.0`, with the USL OpenID provider and documentation commits
+  retained on `usl/v12.0.0`.
+- **Target:** official final tag `v12.0.2` at
+  `13ae6c4cf1a8e73c35a4f0c8816a505506c7acdd`.
+- **Integration:** merge the exact patch tag into a feature branch targeting the
+  existing USL release branch. This retains upstream and downstream ancestry;
+  no major or minor version change, live deployment, or release tag is included.
+- **Preflight:** no STOP items, conflicts, or denylist matches. The custom
+  provider, provider interface, OAuth flow and unlicensed client-button files
+  are unchanged by this patch range.
+- **Makefile review:** retain upstream's Dataminr prepackaged plugin update from
+  2.0.0 to 3.0.0 and generated-test targets. This does not change persisted plugin
+  activation settings. Confirm the enabled plugin set during the coordinated
+  deployment checks.
+- **Defaults:** the new `EnforceLogPathRoot` feature flag remains off by upstream
+  default. No newly enabled feature flag or true configuration default was found.
+- **Database:** migration `000242` restores the legacy `AttributeView`; the patch
+  also repairs the existing `000216`, `000217` and `000223` migration paths. A
+  qualified database/configuration backup is required before deployment. Image
+  rollback alone is not the recovery plan after a database migration.
+- **Workflow review:** the five changed upstream E2E workflows are manual,
+  reusable, or limited to upstream CI/merge/release dispatch. They add no push
+  trigger for `usl/**` and no schedule. The USL image publisher is unchanged.
+- **Qualification:** the native OpenID provider and configuration suites pass
+  against disposable PostgreSQL 18.6. Migration `000216`, `000217`, `000223`
+  and `000242`, one-time cloud login, login-device token, log-path, remote-cluster,
+  client-route and
+  token-store regressions pass. An independent route probe fails on the old
+  release, passes with this patch and fails when the route fix is removed. The
+  native Linux amd64 Team Edition server build passes without Enterprise code.
+  Focused upload-policy API, scheduled-post, thread-move and login-cookie checks
+  also pass in native isolated parallel mode, using the same disposable database.
+- **Remaining rollout checks:** qualify the database/configuration backup, build
+  and inspect the published Team Edition image, then confirm F1–F4 runtime login,
+  enabled plugins and image version during the coordinated deployment. Local
+  preparation is not deployment proof.
+
 ## 2026-10-21: Check only, no update
 
 - **Base:** `v12.0.0` (branch `usl/v12.0.0`). Production runs `12.0.0`,
