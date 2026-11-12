@@ -14,7 +14,8 @@ permissions:
 jobs:
   deploy:
     uses: ./.github/workflows/docs-preview-template.yml
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # This preview is hosted in upstream's private AWS bucket; Docs CI stays public.
+    if: github.repository == 'mattermost/mattermost' && github.event.pull_request.head.repo.full_name == github.repository
     secrets:
       AWS_DOCS_PR_PREVIEW_KEY_ID: ${{ secrets.AWS_DOCS_PR_PREVIEW_KEY_ID }}
       AWS_DOCS_PR_PREVIEW_SECRET_ACCESS_KEY: ${{ secrets.AWS_DOCS_PR_PREVIEW_SECRET_ACCESS_KEY }}

@@ -191,6 +191,8 @@ jobs:
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     with:
+      # The upstream larger-runner label belongs to Mattermost's runner group.
+      runner: ${{ github.repository == 'mattermost/mattermost' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
       name: "Postgres (shard ${{ matrix.shard }})"
       datasource: postgres://mmuser:mostest_password@postgres:5432/mattermost_test?sslmode=disable&connect_timeout=10
       drivername: postgres
@@ -225,6 +227,8 @@ jobs:
       actions: write
     uses: ./.github/workflows/server-test-template.yml
     with:
+      # The upstream larger-runner label belongs to Mattermost's runner group.
+      runner: ${{ github.repository == 'mattermost/mattermost' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
       name: Elasticsearch v8 Compatibility
       datasource: postgres://mmuser:mostest_password@postgres:5432/mattermost_test?sslmode=disable&connect_timeout=10
       drivername: postgres
@@ -243,6 +247,8 @@ jobs:
       actions: write
     uses: ./.github/workflows/server-test-template.yml
     with:
+      # The upstream larger-runner label belongs to Mattermost's runner group.
+      runner: ${{ github.repository == 'mattermost/mattermost' && 'ubuntu-latest-8-cores' || 'ubuntu-latest' }}
       name: OpenSearch v2 Compatibility
       datasource: postgres://mmuser:mostest_password@postgres:5432/mattermost_test?sslmode=disable&connect_timeout=10
       drivername: postgres
@@ -256,6 +262,7 @@ jobs:
   # Sharded for fast iteration. Weekly workflow provides regular full coverage.
   test-postgres-normal-fips:
     if: >-
+      github.repository == 'mattermost/mattermost' &&
       needs.buildenv.outputs.relevant-changed == 'true' &&
       (contains(github.head_ref, 'fips') || needs.buildenv.outputs.gomod-changed == 'true')
     name: "Postgres FIPS (shard ${{ matrix.shard }})"
@@ -311,6 +318,7 @@ jobs:
       fips-enabled: false
   test-mmctl-fips:
     if: >-
+      github.repository == 'mattermost/mattermost' &&
       needs.buildenv.outputs.relevant-changed == 'true' &&
       (contains(github.head_ref, 'fips') || needs.buildenv.outputs.gomod-changed == 'true')
     name: Run mmctl tests (FIPS)

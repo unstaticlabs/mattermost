@@ -39,6 +39,7 @@ jobs:
           persist-credentials: false
 
       - name: buildenv/docker-login
+        if: github.repository == 'mattermost/mattermost'
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -65,7 +66,7 @@ jobs:
           echo "TAG=${tag}" >> "${GITHUB_OUTPUT}"
 
       - name: buildenv/push
-        if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release-')
+        if: github.repository == 'mattermost/mattermost' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release-'))
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           provenance: false
@@ -76,6 +77,8 @@ jobs:
           tags: mattermost/mattermost-build-server:${{ steps.tag.outputs.TAG }}
 
   build-image-fips:
+    # FIPS base images use upstream's private Chainctl/Docker Hub identities.
+    if: github.repository == 'mattermost/mattermost'
     permissions:
       contents: read
       id-token: write
@@ -116,7 +119,7 @@ jobs:
           echo "TAG=${tag}" >> "${GITHUB_OUTPUT}"
 
       - name: buildenv/push
-        if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release-')
+        if: github.repository == 'mattermost/mattermost' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release-'))
         uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           provenance: false
