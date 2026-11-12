@@ -37,6 +37,13 @@ decisions about the STOP and REVIEW items, and the result.
   native Linux amd64 Team Edition server build passes without Enterprise code.
   Focused upload-policy API, scheduled-post, thread-move and login-cookie checks
   also pass in native isolated parallel mode, using the same disposable database.
+- **Fork CI compatibility:** preserve upstream's public regular Server CI and
+  docs builds. Restrict private FIPS/Chainctl bootstrap, Docker Hub publication
+  and AWS documentation preview/cleanup to `mattermost/mattermost`. A same-repo
+  pull request on the USL fork does not have upstream's private identities.
+  Use standard `ubuntu-latest` for USL's normal sharded server tests; keep the
+  upstream larger-runner label for the upstream repository. The USL GHCR
+  publisher and Team Edition product behavior are unchanged.
 - **Remaining rollout checks:** qualify the database/configuration backup, build
   and inspect the published Team Edition image, then confirm F1–F4 runtime login,
   enabled plugins and image version during the coordinated deployment. Local
