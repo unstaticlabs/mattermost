@@ -3,6 +3,48 @@
 Write the newest entry at the top. Each entry gives the target, the
 decisions about the STOP and REVIEW items, and the result.
 
+## 2026-11-12: Update to 12.1.0
+
+- **Base:** `v12.1.0` (branch `usl/v12.1.0`). Production runs `12.0.2`,
+  image `sha-b82e041`.
+- **Target:** final tag `v12.1.0`. GitHub still marks the release as a
+  pre-release, but `v12.1.0-rc4` and `v12.1.0` are the same commit.
+- **12.0.2 fixes:** `v12.1.0` contains all the security and migration fixes
+  of `v12.0.2`. Only release-only commits (version bumps, an E2E change) are
+  not in `v12.1.0`. The brotli update is in `v12.1.0` as v1.2.7.
+- **Branch:** `v12.1.0` plus the three USL commits. The USL diff is the same
+  as on `usl/v12.0.0`. One conflict in this file only.
+
+### Decisions
+
+- STOP, accepted: `server/einterfaces/oauthproviders.go` adds the optional
+  interface `OAuthClaimsProvider`. `OAuthProvider` does not change, so the
+  USL provider compiles without a change.
+- STOP, accepted: `server/channels/app/oauth.go` and
+  `server/channels/web/oauth.go` pass an `OAuthAuthorization` struct in
+  place of three values. The flow and the provider calls stay the same.
+  `oauthAuthorizationScope` adds `AdditionalScopes` only when it is set.
+- STOP, accepted: the feature flag `OpenIdAttributeSync` is `true`. The sync
+  returns before it calls the provider when no attribute mapping exists.
+  The server has no mapping, so nothing changes. If you add a mapping, the
+  log shows "the identity provider cannot report claims".
+- STOP, accepted: `server/config/client.go` adds `EnableFileSearch` to the
+  full client config. The USL change is in the limited config (F2).
+- REVIEW, accepted: `EnableFileIndexing` is `true` by default. It is an
+  Elasticsearch setting, and the server has no Elasticsearch.
+- REVIEW: prepackaged Calls goes to v1.12.6, Boards to v10.1.0, Dataminr to
+  v3.0.0. ServiceNow is removed. The server does not use ServiceNow, and
+  automatic prepackaged installs are off.
+- Database: migrations `000230` to `000235` are new. Back up the database
+  before the deploy.
+- Workflows: the new docs workflows are on pull requests or manual. None
+  runs on a push to `usl/**` or on a schedule.
+
+### Tests
+
+- `go test ./channels/app/oauthproviders/... ./config/` passes.
+- `go build ./cmd/mattermost` passes.
+
 ## 2026-11-12: Prepare the 12.0.2 security patch
 
 - **Base:** `v12.0.0`, with the USL OpenID provider and documentation commits
