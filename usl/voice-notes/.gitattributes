@@ -1,0 +1,2 @@
+# Unified patch context adds a marker before Go indentation.
+recorder.patch whitespace=-space-before-tab
