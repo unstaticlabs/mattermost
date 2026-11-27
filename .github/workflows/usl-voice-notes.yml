@@ -1,0 +1,38 @@
+name: USL voice notes
+
+on:
+  pull_request:
+    paths:
+      - usl/voice-notes/**
+      - .github/workflows/usl-voice-notes.yml
+  push:
+    branches: ['usl/**']
+    paths:
+      - usl/voice-notes/**
+      - .github/workflows/usl-voice-notes.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - run: usl/voice-notes/build "$RUNNER_TEMP/voice-notes"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: mattermost-voice-notes-linux-amd64
+          path: ${{ runner.temp }}/voice-notes/*.tar.gz
+          if-no-files-found: error

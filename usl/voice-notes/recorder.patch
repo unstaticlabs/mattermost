@@ -1,0 +1,374 @@
+diff --git a/plugin.json b/plugin.json
+index e86fe0c..255d691 100644
+--- a/plugin.json
++++ b/plugin.json
+@@ -2,7 +2,7 @@
+     "id": "ch.icorete.mattermost-voice-messages",
+     "name": "Mattermost Voice Messages",
+     "description": "Record and play voice messages in Mattermost channels and threads.",
+-    "version": "0.3.8",
++    "version": "0.3.8+usl.1",
+     "homepage_url": "https://github.com/icoretech/mattermost-voice-messages",
+     "support_url": "https://github.com/icoretech/mattermost-voice-messages/issues",
+     "release_notes_url": "https://github.com/icoretech/mattermost-voice-messages/releases",
+@@ -21,7 +21,7 @@
+     },
+     "settings_schema": {
+         "header": "",
+-        "footer": "Client transcription runs in the user's browser. Audio is not sent to this plugin server for transcription.",
++        "footer": "An optional workspace speech service can transcribe recordings on send. Browser transcription uses the local model instead.",
+         "settings": [
+             {
+                 "key": "ProjectLinks",
+@@ -181,6 +181,13 @@
+                 "help_text": "Optional BCP-47 language tag passed to browser-whisper, for example en or it. Leave empty for auto-detect. Models without language support ignore this value.",
+                 "default": "",
+                 "placeholder": "auto"
++            },
++            {
++                "key": "WorkspaceSpeechURL",
++                "display_name": "Workspace speech endpoint",
++                "type": "text",
++                "help_text": "Optional private speech endpoint for voice notes. Leave empty to keep server transcription off.",
++                "default": ""
+             }
+         ]
+     }
+diff --git a/server/api.go b/server/api.go
+index 17fbf80..a3e62b9 100644
+--- a/server/api.go
++++ b/server/api.go
+@@ -12,6 +12,7 @@ func (p *Plugin) initRouter() *mux.Router {
+
+ 	apiRouter := router.PathPrefix("/api/v1").Subrouter()
+ 	apiRouter.Use(p.mattermostAuthRequired)
++	apiRouter.HandleFunc("/channels/{channel_id}/transcribe", p.handleWorkspaceTranscript).Methods(http.MethodPost)
+ 	apiRouter.HandleFunc("/config", p.handleGetConfig).Methods(http.MethodGet)
+ 	apiRouter.HandleFunc("/voice-messages", p.handleCreateVoiceMessage).Methods(http.MethodPost)
+
+diff --git a/server/configuration.go b/server/configuration.go
+index fa23868..76ef7d0 100644
+--- a/server/configuration.go
++++ b/server/configuration.go
+@@ -98,6 +98,7 @@ func defaultClientTranscriptionQuantization() string {
+ }
+
+ type configuration struct {
++	WorkspaceSpeechURL              string `json:"WorkspaceSpeechURL"`
+ 	MaxVoiceMessageSizeMB           *int64 `json:"MaxVoiceMessageSizeMB"`
+ 	MaxRecordingDurationSeconds     *int64 `json:"MaxRecordingDurationSeconds"`
+ 	EnableVoiceMessages             *bool  `json:"EnableVoiceMessages"`
+@@ -110,6 +111,7 @@ type configuration struct {
+ }
+
+ type clientConfiguration struct {
++	WorkspaceSpeechEnabled          bool   `json:"workspace_speech_enabled"`
+ 	MaxVoiceMessageBytes            int64  `json:"max_voice_message_bytes"`
+ 	MaxRecordingDurationMS          int64  `json:"max_recording_duration_ms"`
+ 	VoiceMessagesEnabled            bool   `json:"voice_messages_enabled"`
+@@ -142,6 +144,7 @@ func (c *configuration) Clone() *configuration {
+ 	}
+
+ 	return &configuration{
++		WorkspaceSpeechURL:              c.WorkspaceSpeechURL,
+ 		MaxVoiceMessageSizeMB:           cloneInt64Pointer(c.MaxVoiceMessageSizeMB),
+ 		MaxRecordingDurationSeconds:     cloneInt64Pointer(c.MaxRecordingDurationSeconds),
+ 		EnableVoiceMessages:             cloneBoolPointer(c.EnableVoiceMessages),
+@@ -192,6 +195,7 @@ func (c *configuration) clientTranscriptionLanguage() string {
+
+ func (c *configuration) clientConfiguration() clientConfiguration {
+ 	return clientConfiguration{
++		WorkspaceSpeechEnabled:          strings.TrimSpace(c.WorkspaceSpeechURL) != "",
+ 		MaxVoiceMessageBytes:            c.maxVoiceMessageSizeMB() * bytesPerMiB,
+ 		MaxRecordingDurationMS:          c.maxRecordingDurationSeconds() * 1000,
+ 		VoiceMessagesEnabled:            c.voiceMessagesEnabled(),
+@@ -205,6 +209,9 @@ func (c *configuration) clientConfiguration() clientConfiguration {
+ }
+
+ func (c *configuration) Validate() error {
++	if !validSpeechEndpoint(strings.TrimSpace(c.WorkspaceSpeechURL)) {
++		return fmt.Errorf("invalid WorkspaceSpeechURL")
++	}
+ 	if err := c.validateVoiceLimits(); err != nil {
+ 		return err
+ 	}
+diff --git a/server/voice_message.go b/server/voice_message.go
+index 8cfea05..47c341f 100644
+--- a/server/voice_message.go
++++ b/server/voice_message.go
+@@ -61,7 +61,7 @@ func (p *Plugin) handleCreateVoiceMessage(w http.ResponseWriter, r *http.Request
+ 		return
+ 	}
+ 	r.Body = http.MaxBytesReader(w, r.Body, limits.maxBytes+multipartOverheadBytes)
+-	req, handlerErr := parseVoiceMessageRequest(r, limits.maxBytes, configuration.clientTranscriptionEnabled())
++	req, handlerErr := parseVoiceMessageRequest(r, limits.maxBytes, configuration.clientTranscriptionEnabled() || strings.TrimSpace(configuration.WorkspaceSpeechURL) != "")
+ 	if handlerErr != nil {
+ 		http.Error(w, handlerErr.message, handlerErr.status)
+ 		return
+@@ -118,6 +118,9 @@ func (p *Plugin) handleCreateVoiceMessage(w http.ResponseWriter, r *http.Request
+ 	}
+
+ 	post := buildVoiceMessagePost(userID, req, fileInfo)
++	if strings.TrimSpace(configuration.WorkspaceSpeechURL) != "" && !configuration.clientTranscriptionEnabled() && req.transcript == "" {
++		post.Props["workspace_transcript_pending"] = true
++	}
+ 	createdPost, appErr := p.API.CreatePost(post)
+ 	if appErr != nil {
+ 		p.API.LogWarn("voice message file uploaded but post creation failed", "file_id", fileInfo.Id, "channel_id", req.channelID)
+diff --git a/webapp/src/api/client_config_api.ts b/webapp/src/api/client_config_api.ts
+index 7a65911..66b5fd3 100644
+--- a/webapp/src/api/client_config_api.ts
++++ b/webapp/src/api/client_config_api.ts
+@@ -7,6 +7,7 @@ import {
+ import { getSiteBasePath } from "./site_base_path";
+
+ export type VoiceMessagesClientConfig = {
++  workspaceSpeechEnabled?: boolean;
+   maxVoiceMessageBytes: number;
+   maxRecordingDurationMs: number;
+   voiceMessagesEnabled: boolean;
+@@ -19,6 +20,7 @@ export type VoiceMessagesClientConfig = {
+ };
+
+ type ServerVoiceMessagesClientConfig = {
++  workspace_speech_enabled?: unknown;
+   max_voice_message_bytes?: unknown;
+   max_recording_duration_ms?: unknown;
+   voice_messages_enabled?: unknown;
+@@ -103,6 +105,9 @@ function mapClientConfig(
+       payload.voice_messages_enabled,
+       defaultClientConfig.voiceMessagesEnabled,
+     ),
++    ...(payload.workspace_speech_enabled === true
++      ? { workspaceSpeechEnabled: true }
++      : {}),
+     uploadedAudioPreviewEnabled: booleanOrDefault(
+       payload.uploaded_audio_preview_enabled,
+       defaultClientConfig.uploadedAudioPreviewEnabled,
+diff --git a/webapp/src/api/voice_messages.ts b/webapp/src/api/voice_messages.ts
+index 43990f2..e9f5f58 100644
+--- a/webapp/src/api/voice_messages.ts
++++ b/webapp/src/api/voice_messages.ts
+@@ -18,7 +18,7 @@ export type UploadVoiceMessageResponse = {
+   file_info: FileInfo;
+ };
+
+-function getCsrfToken(): string {
++export function getCsrfToken(): string {
+   for (const cookie of document.cookie.split(";")) {
+     const trimmed = cookie.trim();
+     if (trimmed.startsWith("MMCSRF=")) {
+diff --git a/webapp/src/components/voice_post.tsx b/webapp/src/components/voice_post.tsx
+index 5b2a6ea..911613e 100644
+--- a/webapp/src/components/voice_post.tsx
++++ b/webapp/src/components/voice_post.tsx
+@@ -1,3 +1,4 @@
++import { WorkspaceTranscript } from "./workspace_transcript";
+ import type { Post } from "@mattermost/types/posts";
+ import React from "react";
+ import { getMattermostFileUrl } from "../audio/file_url";
+@@ -25,12 +26,17 @@ export function VoicePostComponent({
+     : "";
+
+   return (
+-    <VoiceAudioPlayer
+-      src={fileUrl}
+-      durationMs={durationMs}
+-      fallbackHref={fileUrl}
+-      compact={compactDisplay || isRHS}
+-      waveform={waveform}
+-    />
++    <>
++      <VoiceAudioPlayer
++        src={fileUrl}
++        durationMs={durationMs}
++        fallbackHref={fileUrl}
++        compact={compactDisplay || isRHS}
++        waveform={waveform}
++      />
++      {post.props?.workspace_transcript_pending === true &&
++        !post.message &&
++        fileId && <WorkspaceTranscript post={post} fileId={fileId} />}
++    </>
+   );
+ }
+diff --git a/webapp/src/components/voice_recorder_action.test.tsx b/webapp/src/components/voice_recorder_action.test.tsx
+index cc7d17e..5e2ddcd 100644
+--- a/webapp/src/components/voice_recorder_action.test.tsx
++++ b/webapp/src/components/voice_recorder_action.test.tsx
+@@ -104,6 +104,7 @@ type ServerClientConfig = {
+   max_recording_duration_ms: number;
+   voice_messages_enabled: boolean;
+   uploaded_audio_preview_enabled: boolean;
++  workspace_speech_enabled: boolean;
+   client_transcription_enabled: boolean;
+   client_transcription_auto_start: boolean;
+   client_transcription_model: string;
+@@ -116,6 +117,7 @@ const defaultServerClientConfig: ServerClientConfig = {
+   max_recording_duration_ms: 21600000,
+   voice_messages_enabled: true,
+   uploaded_audio_preview_enabled: true,
++  workspace_speech_enabled: false,
+   client_transcription_enabled: false,
+   client_transcription_auto_start: false,
+   client_transcription_model: "whisper-tiny",
+@@ -136,9 +138,11 @@ function defaultUploadResponse() {
+ function installFetchMock({
+   config,
+   uploadResponse,
++  speechResponse,
+ }: {
+   config?: Partial<ServerClientConfig>;
+   uploadResponse?: () => Response | Promise<Response>;
++  speechResponse?: () => Response;
+ } = {}) {
+   vi.stubGlobal(
+     "fetch",
+@@ -147,6 +151,10 @@ function installFetchMock({
+         return Response.json({ ...defaultServerClientConfig, ...config });
+       }
+
++      if (String(input).endsWith("/transcribe") && speechResponse) {
++        return speechResponse();
++      }
++
+       if (init?.method === "POST") {
+         return uploadResponse ? uploadResponse() : defaultUploadResponse();
+       }
+@@ -389,6 +397,42 @@ describe("VoiceRecorderAction", () => {
+     ).not.toBeInTheDocument();
+   });
+
++  it.each([
++    { status: 200, text: "Le micro fonctionne." },
++    { status: 503, text: null },
++  ])(
++    "keeps the audio and thread when workspace speech returns $status",
++    async ({ status, text }) => {
++      installRecorderEnvironment(
++        { stop: vi.fn() },
++        {
++          config: { workspace_speech_enabled: true },
++          speechResponse: () => Response.json({ text }, { status }),
++        },
++      );
++      render(
++        <VoiceRecorderAction
++          draft={{ channelId: "channel-id", rootId: "root-id" }}
++        />,
++      );
++      await recordAndReview();
++      fireEvent.click(
++        screen.getByRole("button", { name: "Send voice message" }),
++      );
++
++      await waitFor(() => expect(getUploadFetchCalls()).toHaveLength(2));
++      const [[speechUrl, speech], [postUrl, post]] = getUploadFetchCalls();
++      expect(String(speechUrl)).toMatch(/channels\/channel-id\/transcribe$/);
++      expect(speech?.body).toBeInstanceOf(Blob);
++      expect(String(postUrl)).toMatch(/voice-messages$/);
++      const form = post?.body as FormData;
++      expect(form.get("channel_id")).toBe("channel-id");
++      expect(form.get("root_id")).toBe("root-id");
++      expect(form.get("audio")).toBeInstanceOf(File);
++      expect(form.get("transcript")).toBe(text);
++    },
++  );
++
+   it("does not send transcripts when transcription is disabled", async () => {
+     const track = { stop: vi.fn() };
+     installRecorderEnvironment(track);
+diff --git a/webapp/src/components/voice_recorder_action.tsx b/webapp/src/components/voice_recorder_action.tsx
+index 40a2fe2..97968a1 100644
+--- a/webapp/src/components/voice_recorder_action.tsx
++++ b/webapp/src/components/voice_recorder_action.tsx
+@@ -1,3 +1,4 @@
++import { voiceLabel } from "../api/workspace_speech";
+ import React, { useRef } from "react";
+ import { createPortal } from "react-dom";
+ import {
+@@ -137,6 +138,7 @@ function ReviewPanel({
+   onRecheckLimits,
+   error,
+   clientTranscriptionEnabled,
++  workspaceSpeechEnabled,
+   onCancel,
+   onCancelTranscription,
+   onSend,
+@@ -152,6 +154,7 @@ function ReviewPanel({
+   onRecheckLimits: () => void;
+   error: string;
+   clientTranscriptionEnabled: boolean;
++  workspaceSpeechEnabled?: boolean;
+   onCancel: () => void;
+   onCancelTranscription: () => void;
+   onSend: () => void;
+@@ -178,6 +181,14 @@ function ReviewPanel({
+         checkingLimits={checkingLimits}
+         onRecheckLimits={onRecheckLimits}
+       />
++      {workspaceSpeechEnabled && (
++        <p>
++          {voiceLabel(
++            "Your workspace transcribes the audio when you send it.",
++            "Votre espace transcrit le vocal à l’envoi.",
++          )}
++        </p>
++      )}
+       {clientTranscriptionEnabled && !review.limitError ? (
+         <div className="VoiceRecorderAction__transcription">
+           {transcriptionStatus === "transcribing" ? (
+@@ -391,6 +402,7 @@ function VoiceRecorderSession({ draft }: VoiceRecorderActionProps) {
+           error={controller.error}
+           checkingLimits={controller.checkingLimits}
+           onRecheckLimits={() => void controller.recheckRecordingLimits()}
++          workspaceSpeechEnabled={controller.limits.workspaceSpeechEnabled && !controller.limits.clientTranscriptionEnabled}
+           clientTranscriptionEnabled={
+             controller.limits.clientTranscriptionEnabled
+           }
+diff --git a/webapp/src/voice_recorder/use_voice_recorder_controller.ts b/webapp/src/voice_recorder/use_voice_recorder_controller.ts
+index a9fca36..268af23 100644
+--- a/webapp/src/voice_recorder/use_voice_recorder_controller.ts
++++ b/webapp/src/voice_recorder/use_voice_recorder_controller.ts
+@@ -3,6 +3,7 @@ import {
+   loadClientConfig,
+   type VoiceMessagesClientConfig,
+ } from "../api/client_config";
++import { workspaceTranscript } from "../api/workspace_speech";
+ import { uploadVoiceMessage } from "../api/voice_messages";
+ import {
+   extractWaveformPeaksFromBlob,
+@@ -569,6 +570,22 @@ export function useVoiceRecorderController(
+         setStatus("review");
+         return;
+       }
++      let message = currentConfig.clientTranscriptionEnabled ? transcript : "";
++      if (
++        currentConfig.workspaceSpeechEnabled &&
++        !currentConfig.clientTranscriptionEnabled
++      ) {
++        try {
++          message = await workspaceTranscript(
++            review.blob,
++            draft.channelId,
++            abortController.signal,
++          );
++        } catch {
++          if (abortController.signal.aborted) return;
++          // The recording can still be posted and transcribed from the same file later.
++        }
++      }
+       await uploadVoiceMessage({
+         blob: review.blob,
+         channelId: draft.channelId,
+@@ -576,9 +593,7 @@ export function useVoiceRecorderController(
+         durationMs: review.durationMs,
+         mimeType: review.mimeType,
+         waveform: review.waveform,
+-        transcript: currentConfig.clientTranscriptionEnabled
+-          ? transcript
+-          : undefined,
++        transcript: message || undefined,
+         signal: abortController.signal,
+       });
+       if (abortController.signal.aborted) return;

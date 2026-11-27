@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Build a loadable amd64 bundle against the published recorder source.
+set -euo pipefail
+here=$(cd -- "$(dirname -- "$0")" && pwd)
+revision=f72cb0508ac2e5179c56051375b21a9a528db001
+if [[ $# != 1 ]]; then
+    echo "Usage: $0 OUTPUT_DIRECTORY" >&2
+    exit 2
+fi
+mkdir -p "$1"
+output=$(cd -- "$1" && pwd)
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+mkdir -p "$work/source"
+if [[ -n "${VOICE_RECORDER_SOURCE:-}" ]]; then
+    source_repo=$VOICE_RECORDER_SOURCE
+else
+    source_repo="$work/recorder"
+    git init -q "$source_repo"
+    git -C "$source_repo" fetch --quiet --depth 1 https://github.com/icoretech/mattermost-voice-messages.git "$revision"
+fi
+git -C "$source_repo" archive "$revision" | tar -x -C "$work/source"
+cd "$work/source"
+git apply --whitespace=error "$here/recorder.patch"
+cp -R "$here/overlay/." .
+go run ./build/manifest apply
+go test ./server/...
+(
+    cd webapp
+    npm ci --ignore-scripts --no-audit --no-fund
+    npm run typecheck
+    npm test
+    npm run build
+)
+mkdir -p server/dist
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o server/dist/plugin-linux-amd64 ./server
+python3 "$here/bundle.py" "$work/source" "$output/mattermost-voice-notes-0.3.8-usl.1-linux-amd64.tar.gz"
